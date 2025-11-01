@@ -10,6 +10,7 @@ wheels/
 staticfiles/
 *.log
 db.sqlite3
+.env/
 
 # Virtual environments
 .venv
