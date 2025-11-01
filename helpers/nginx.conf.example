@@ -1,0 +1,31 @@
+# /etc/nginx/sites-available/modulo_api
+server {
+    listen 80;
+    server_name your-domain.com;  # Replace with your domain
+
+    # Handle static files
+    location /static/ {
+        alias /home/nika/django/modulo_api/staticfiles/;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # Handle media files (if you have any)
+    location /media/ {
+        alias /home/nika/django/modulo_api/media/;
+        expires 1M;
+        add_header Cache-Control "public";
+    }
+
+    # Pass all other requests to Gunicorn
+    location / {
+        include proxy_params;
+        proxy_pass http://unix:/run/gunicorn.sock;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+}
