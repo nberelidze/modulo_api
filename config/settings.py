@@ -8,6 +8,10 @@ env = environ.Env()
 env.read_env('.env/django.env')
 env.read_env('.env/oerp.env')
 
+# Security settings from environment
+ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['localhost', '127.0.0.1'])
+DEBUG = env.bool('DEBUG', default=True)
+
 # OpenERP XML-RPC Configuration
 OERP_XMLRPC = {
     'username': env('OERP_USERNAME', default='admin'),
