@@ -476,7 +476,7 @@ def get_parameter_abnormal_indicator(row):
         return None
 
     retval = None
-    if value_min is not None and ((boundary_include and value < value_min) or (not boundary_include and value <= value_min)):
+    if value_min is not None and (value_min != 0) and ((boundary_include and value < value_min) or (not boundary_include and value <= value_min)):
         retval = 'down'
     elif value_max is not None and (value_max != 0) and ((boundary_include and value > value_max) or (not boundary_include and value >= value_max)):
         retval = 'up'
@@ -528,18 +528,46 @@ def get_lab_orders(personal_number, laborder_id=None, include_parameters=False):
     """
     with get_oerp_connection().cursor() as cursor:
         # Build WHERE clause
-        where_clauses = ["rp.inno_id = %s", "rp.inno_patient = true", "lo.state = 'done'"]
-        params = [personal_number]
-        
+        where_clauses = ["rp.inno_id = %(personal_number)s", "rp.inno_patient = true", "lo.create_date >= '2020-01-01'", "lo.state = 'done'"]
+
+        # comment_inside and comment_inside_en are only shown for certain categories (parent_id in 15 (ადგილობრივი), 35 (ფილიალები))
+        LOCAL_CATEGORY_PARENT_IDS = (15, 35)
+        # categories for which has_details must always be false regardless of parameters present
+        # 1.	6 – PAP
+        # 2.	58- PAP
+        # 3.	94 – PCR/PAP
+        # 4.	65 - ადგილობრივი/PAP
+        # 5.	157 - Limbach/გენ
+        # 6.	17 - გენეტიკა
+        # 7.	53 - გენეტიკა
+        # 8.	102 - გენეტიკა/პანელი
+        # 9.	50 - ლაბორატორია / გენეტიკა
+        # 10.	21- პათომორფოლოგია
+        # 11.	51 - მორფოლოგია
+        # 12.	74 - ადგილობრივი მორფოლოგია
+        # 13.	75 - ადგილობრივი მორფოლოგია
+        # 14.	77 – morfologia
+        # 15.	80 - მორფოლოგიური კვლევები
+
+        NO_DETAILS_CATEGORY_IDS = (238,6,58,59,94,65,157,17,53,102,50,21,51,74,75,77,80)
+        NO_PDF_CATEGORY_IDS     = (    6,58,59,94,65,157,17,53,102,50,21,51,74,75,77,80)
+
+        params_dict = {
+            'personal_number': personal_number,
+            'laborder_id': laborder_id,
+            'local_category_parent_ids': LOCAL_CATEGORY_PARENT_IDS,
+            'no_details_category_ids': NO_DETAILS_CATEGORY_IDS,
+        }
+
         if laborder_id:
-            where_clauses.append("lo.id = %s")
-            params.append(laborder_id)
-        
+            where_clauses.append("lo.id = %(laborder_id)s")
+
         sql = f"""
             WITH category_map AS (
                 SELECT
                     CASE WHEN wupc.id IS NOT NULL THEN wupc.id ELSE pc.id END AS id,
                     pc.id as pc_categ_id,
+                    pc.parent_id as parent_id,
                     CASE WHEN wupc.id IS NOT NULL THEN wupc.name ELSE pc.name END AS name,
                     CASE WHEN wupc.id IS NOT NULL THEN 'web.user.portal.category,name' ELSE 'product.category,name' END AS it_translation_name
                 FROM product_category pc
@@ -563,27 +591,46 @@ def get_lab_orders(personal_number, laborder_id=None, include_parameters=False):
                 lo.date_done,
                 --lo.print_urin,
                 --lo.active,
-                lo.comment_inside,
-                lo.comment_inside_en,
+                CASE WHEN cm.parent_id IN %(local_category_parent_ids)s THEN lo.comment_inside ELSE NULL END as comment_inside,
+                CASE WHEN cm.parent_id IN %(local_category_parent_ids)s THEN lo.comment_inside_en ELSE NULL END as comment_inside_en,
                 --lo.cap_blood,
                 --lo.erythrocyte,
                 --lo.not_read,
                 lo.create_date,
                 lo.write_date,
-                EXISTS (
+                CASE WHEN lo.categ_id IN %(no_details_category_ids)s THEN false ELSE EXISTS (
                     SELECT 1 FROM inno_laborder_parameter lp 
                     WHERE lp.laborder_id = lo.id AND lp.active
-                ) as has_details
+                ) END as has_details,
+                (
+                    SELECT string_agg(
+                        concat_ws(',', NULLIF(ip.name, ''), NULLIF(it_kw.value, ''), NULLIF(ip.abbr, '')),
+                        ', '
+                    )
+                    FROM inno_laborder_parameter lp
+                    JOIN inno_parameter ip ON lp.parameter_id = ip.id
+                    LEFT JOIN ir_translation it_kw ON it_kw.res_id = ip.id
+                        AND it_kw.lang = 'ka_GE' AND it_kw."type" = 'model' AND it_kw.name = 'inno.parameter,name'
+                    WHERE lp.laborder_id = lo.id AND lp.active
+                ) as meta_keywords,
+                isa.name as pregnancy_week,
+                it_add.value as pregnancy_week_geo
             FROM inno_laborder lo
                 JOIN res_partner rp ON lo.partner_id = rp.id
                 LEFT JOIN category_map cm ON cm.pc_categ_id = lo.categ_id
                 LEFT JOIN ir_translation it ON it.res_id = cm.id 
                     AND it.lang = 'ka_GE' 
                     AND it.name = cm.it_translation_name
+                LEFT JOIN inno_standard_add isa ON isa.id = lo.add_id
+                LEFT JOIN ir_translation it_add ON it_add.res_id = isa.id 
+                    AND it_add.name = 'inno.standard.add,name'
+                    AND it_add.lang = 'ka_GE' 
+                    AND it_add.module is null
             WHERE {' AND '.join(where_clauses)}
             ORDER BY lo.date_order DESC NULLS LAST, lo.id DESC
         """
-        cursor.execute(sql, params)
+        cursor.execute(sql, params_dict)
+
         
         columns = [col[0] for col in cursor.description]
         
@@ -624,6 +671,7 @@ def get_lab_orders(personal_number, laborder_id=None, include_parameters=False):
                         --lp.value_text_auto,
                         lp.uom_id,
                         pu.name as uom_name,
+                        it_uom.value as uom_name_geo,
                         lp.state,
                         lp.comment,
                         lp.commenten,
@@ -634,17 +682,25 @@ def get_lab_orders(personal_number, laborder_id=None, include_parameters=False):
                         --lp.instrument_id,
                         lp.instrument_name,
                         --lp.default_instrument_code,
-                        lp.updated_at
+                        lp.updated_at,
                         --lp.updated_by
+                        mat_pp.id as material_id,
+                        pt.name as material_name,
+                        it_mat.value as material_name_geo
                     FROM inno_laborder_parameter lp
                         LEFT JOIN inno_parameter ip ON lp.parameter_id = ip.id
-                        LEFT JOIN product_product pp ON lp.research_id = pp.id
+                            LEFT JOIN ir_translation it on it.res_id = ip.id and it.lang = 'ka_GE' and it."type" = 'model' and it.name = 'inno.parameter,name'
+                        --LEFT JOIN product_product pp ON lp.research_id = pp.id
                         LEFT JOIN product_uom pu ON lp.uom_id = pu.id
-                        LEFT JOIN ir_translation it on it.res_id = ip.id and it.lang = 'ka_GE' and it."type" = 'model' and it.name = 'inno.parameter,name'
+                            LEFT JOIN ir_translation it_uom on it_uom.res_id = pu.id and it_uom.lang = 'ka_GE' and it_uom."type" = 'model' and it_uom.name = 'product.uom,name'
                         LEFT JOIN inno_textvalue itx on itx.id = lp.value_text
-                        LEFT JOIN ir_translation it2 on it2.res_id = itx.id and it2.lang = 'ka_GE' and it2."type" = 'model' and it2.name = 'inno.textvalue,name'
+                            LEFT JOIN ir_translation it2 on it2.res_id = itx.id and it2.lang = 'ka_GE' and it2."type" = 'model' and it2.name = 'inno.textvalue,name'
                         LEFT JOIN inno_textvalue itx2 on itx2.id = lp.text_value
-                        LEFT JOIN ir_translation it3 on it3.res_id = itx2.id and it3.lang = 'ka_GE' and it3."type" = 'model' and it3.name = 'inno.textvalue,name'
+                            LEFT JOIN ir_translation it3 on it3.res_id = itx2.id and it3.lang = 'ka_GE' and it3."type" = 'model' and it3.name = 'inno.textvalue,name'
+                        JOIN inno_laborder_material ilm on ilm.laborder_id = lp.laborder_id and ilm.research_id = lp.research_id
+                            JOIN product_product mat_pp ON mat_pp.id = ilm.material_id
+                            JOIN product_template pt on pt.id = mat_pp.product_tmpl_id
+                            LEFT JOIN ir_translation it_mat on it_mat.res_id = pt.id and it_mat.lang = 'ka_GE' and it_mat."type" = 'model' and it_mat.name = 'product.template,name'
 
                    WHERE lp.active and lp.laborder_id = %s
                     ORDER BY lp.sequence NULLS LAST, lp.id
@@ -667,21 +723,24 @@ def get_lab_orders(personal_number, laborder_id=None, include_parameters=False):
             else:
                 logger.debug(f"get_lab_orders({personal_number}, {laborder_id}) found order")
             
-            # Fetch associated PDFs from modulo_document_registry
-            sql_pdfs = """
-                SELECT uuid, store_fname, name, comment
-                FROM modulo_document_registry
-                WHERE res_model = 'inno.laborder'
-                  AND res_id = %s
-                  AND state = 'published'
-                ORDER BY create_date
-            """
-            cursor.execute(sql_pdfs, (laborder_id,))
-            pdf_columns = [col[0] for col in cursor.description]
-            lab_order['pdf_files'] = [
-                {**dict(zip(pdf_columns, row)), 'url': PDF_SERVER_URL + (row[1] or '')}
-                for row in cursor.fetchall()
-            ]
+            if lab_order['categ_id'] in NO_PDF_CATEGORY_IDS:
+                lab_order['pdf_files'] = []  # No PDFs for this category
+            else:
+                # Fetch associated PDFs from modulo_document_registry
+                sql_pdfs = """
+                    SELECT uuid, store_fname, name, comment
+                    FROM modulo_document_registry
+                    WHERE res_model = 'inno.laborder'
+                    AND res_id = %s
+                    AND state = 'published'
+                    ORDER BY create_date
+                """
+                cursor.execute(sql_pdfs, (laborder_id,))
+                pdf_columns = [col[0] for col in cursor.description]
+                lab_order['pdf_files'] = [
+                    {**dict(zip(pdf_columns, row)), 'url': PDF_SERVER_URL + (row[1] or '')}
+                    for row in cursor.fetchall()
+                ]
             
             return lab_order
         else:
@@ -689,7 +748,7 @@ def get_lab_orders(personal_number, laborder_id=None, include_parameters=False):
             lab_orders = [dict(zip(columns, row)) for row in cursor.fetchall()]
             
             if lab_orders:
-                laborder_ids = [o['id'] for o in lab_orders]
+                laborder_ids = [o['id'] for o in lab_orders if o['categ_id'] not in NO_PDF_CATEGORY_IDS]
                 sql_pdfs = """
                     SELECT uuid, store_fname, name, comment, res_id
                     FROM modulo_document_registry
